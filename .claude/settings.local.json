@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch(domain:1staid4sme.up.railway.app)"
+      "WebFetch(domain:1staid4sme.up.railway.app)",
+      "Bash(bun run *)"
     ]
   }
 }

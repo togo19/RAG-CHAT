@@ -70,6 +70,7 @@ export default function Admin() {
   const [uploads, setUploads] = useState<ActiveUpload[]>([]);
   const [replacePrompt, setReplacePrompt] = useState<ReplacePrompt | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const fileInput = useRef<HTMLInputElement>(null);
 
   function pushToast(tone: Toast['tone'], message: string) {
@@ -81,6 +82,12 @@ export default function Admin() {
   async function refresh() {
     const rows = await api<FileRow[]>('/admin/files');
     setFiles(rows);
+    setSelected((prev) => {
+      const valid = new Set(rows.map((r) => r.id));
+      const next = new Set<string>();
+      for (const id of prev) if (valid.has(id)) next.add(id);
+      return next.size === prev.size ? prev : next;
+    });
   }
 
   useEffect(() => {
@@ -220,10 +227,45 @@ export default function Admin() {
     // actual Qdrant + S3 + DB work. If it fails, the SSE handler pushes a
     // toast and refresh() re-adds the row with status=delete_failed.
     setFiles((prev) => prev.filter((f) => f.id !== id));
+    setSelected((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
     try {
       await api(`/admin/files/${id}`, { method: 'DELETE' });
     } catch (e) {
       pushToast('error', `Delete request failed: ${e}. Refreshing.`);
+      refresh();
+    }
+  }
+
+  function toggleSelect(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    setSelected((prev) => (prev.size === files.length ? new Set() : new Set(files.map((f) => f.id))));
+  }
+
+  async function delSelected() {
+    if (selected.size === 0) return;
+    const ids = Array.from(selected);
+    if (!confirm(`Delete ${ids.length} file${ids.length === 1 ? '' : 's'} and all of their vectors?`)) return;
+    setFiles((prev) => prev.filter((f) => !selected.has(f.id)));
+    setSelected(new Set());
+    const results = await Promise.allSettled(
+      ids.map((id) => api(`/admin/files/${id}`, { method: 'DELETE' })),
+    );
+    const failed = results.filter((r) => r.status === 'rejected').length;
+    if (failed > 0) {
+      pushToast('error', `${failed} delete request${failed === 1 ? '' : 's'} failed. Refreshing.`);
       refresh();
     }
   }
@@ -314,10 +356,49 @@ export default function Admin() {
       )}
 
       <section className="mt-6 rounded-lg border border-border bg-background">
-        <header className="border-b border-border px-4 py-3">
-          <h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            Files ({files.length})
-          </h3>
+        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
+          <div className="flex items-center gap-3">
+            {files.length > 0 && (
+              <input
+                type="checkbox"
+                aria-label="Select all files"
+                checked={selected.size === files.length && files.length > 0}
+                ref={(el) => {
+                  if (el) el.indeterminate = selected.size > 0 && selected.size < files.length;
+                }}
+                onChange={toggleSelectAll}
+                className="h-4 w-4 cursor-pointer accent-primary"
+              />
+            )}
+            <h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              Files ({files.length})
+              {selected.size > 0 && (
+                <span className="ml-2 normal-case tracking-normal text-foreground">
+                  · {selected.size} selected
+                </span>
+              )}
+            </h3>
+          </div>
+          {files.length > 0 && (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={toggleSelectAll}
+                className="rounded-md border border-border px-3 py-1 text-xs font-medium text-muted-foreground transition hover:bg-muted"
+              >
+                {selected.size === files.length ? 'Deselect all' : 'Select all'}
+              </button>
+              {selected.size > 0 && (
+                <button
+                  type="button"
+                  onClick={delSelected}
+                  className="rounded-md border border-red-200 bg-red-50 px-3 py-1 text-xs font-medium text-red-700 transition hover:bg-red-100"
+                >
+                  Delete selected ({selected.size})
+                </button>
+              )}
+            </div>
+          )}
         </header>
         {files.length === 0 ? (
           <div className="p-8 text-center text-sm text-muted-foreground">
@@ -333,6 +414,13 @@ export default function Admin() {
                   : 0;
               return (
                 <li key={f.id} className="flex items-center gap-3 px-4 py-3 sm:gap-4">
+                  <input
+                    type="checkbox"
+                    aria-label={`Select ${f.filename}`}
+                    checked={selected.has(f.id)}
+                    onChange={() => toggleSelect(f.id)}
+                    className="h-4 w-4 shrink-0 cursor-pointer accent-primary"
+                  />
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                       <span className="min-w-0 truncate text-sm font-medium text-foreground">
