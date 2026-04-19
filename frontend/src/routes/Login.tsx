@@ -1,4 +1,5 @@
 import { Link } from 'react-router-dom';
+import { API_BASE } from '@/lib/apiBase';
 
 export default function Login() {
   return (
@@ -9,7 +10,7 @@ export default function Login() {
           Continue with your Google account to chat with the knowledge base.
         </p>
         <a
-          href="/api/auth/google/login"
+          href={`${API_BASE}/auth/google/login`}
           className="mt-6 inline-flex w-full items-center justify-center rounded-md bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2"
         >
           Continue with Google

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 import { api } from '../lib/api';
+import { API_BASE } from '../lib/apiBase';
 import { useSession } from '../lib/auth';
 import { uploadWithProgress } from '../lib/stream';
 
@@ -84,7 +85,7 @@ export default function Admin() {
 
   useEffect(() => {
     refresh();
-    const es = new EventSource('/api/admin/files/events', { withCredentials: true });
+    const es = new EventSource(`${API_BASE}/admin/files/events`, { withCredentials: true });
     es.onmessage = (ev) => {
       try {
         const data = JSON.parse(ev.data);
