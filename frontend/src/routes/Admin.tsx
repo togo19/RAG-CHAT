@@ -43,7 +43,9 @@ function humanSize(n: number): string {
 }
 
 const STATUS_LABEL: Record<string, string> = {
-  pending_ingest: 'Queued',
+  staged: 'Staged',
+  queued: 'Queued',
+  pending_ingest: 'Starting',
   parsing: 'Parsing',
   chunking: 'Chunking',
   embedding: 'Embedding',
@@ -56,6 +58,8 @@ const STATUS_TONE: Record<string, string> = {
   ready: 'bg-accent text-accent-foreground',
   failed: 'bg-red-100 text-red-700',
   delete_failed: 'bg-red-100 text-red-700',
+  staged: 'bg-amber-100 text-amber-800',
+  queued: 'bg-muted text-muted-foreground',
   pending_ingest: 'bg-muted text-muted-foreground',
   parsing: 'bg-primary/10 text-primary',
   chunking: 'bg-primary/10 text-primary',
@@ -119,6 +123,8 @@ export default function Admin() {
         }
         if (
           data.status === 'ready' ||
+          data.status === 'staged' ||
+          data.status === 'queued' ||
           data.status === 'pending_ingest' ||
           data.status === 'deleted'
         ) {
@@ -163,7 +169,7 @@ export default function Admin() {
         }
         const result = (body as { results: any[] }).results?.[0];
         if (!result) continue;
-        if (result.status === 'queued') {
+        if (result.status === 'staged' || result.status === 'queued') {
           setUploads((prev) =>
             prev.map((u) =>
               u.key === item.key ? { ...u, phase: 'done', loaded: u.total } : u,
@@ -254,6 +260,18 @@ export default function Admin() {
     setSelected((prev) => (prev.size === files.length ? new Set() : new Set(files.map((f) => f.id))));
   }
 
+  async function startIngestion() {
+    try {
+      const res = await api<{ queued: number }>('/admin/files/start-ingestion', {
+        method: 'POST',
+      });
+      pushToast('info', `Queued ${res.queued} file${res.queued === 1 ? '' : 's'} for ingestion.`);
+      refresh();
+    } catch (e) {
+      pushToast('error', `Failed to start ingestion: ${e}`);
+    }
+  }
+
   async function delSelected() {
     if (selected.size === 0) return;
     const ids = Array.from(selected);
@@ -269,6 +287,8 @@ export default function Admin() {
       refresh();
     }
   }
+
+  const stagedCount = files.filter((f) => f.status === 'staged').length;
 
   return (
     <main className="mx-auto max-w-5xl p-4 sm:p-6 md:p-8">
@@ -316,6 +336,27 @@ export default function Admin() {
         </div>
       </section>
 
+      {stagedCount > 0 && (
+        <section className="mt-4 flex flex-col gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-sm font-medium text-amber-900">
+              {stagedCount} file{stagedCount === 1 ? '' : 's'} staged
+            </p>
+            <p className="mt-0.5 text-xs text-amber-800/80">
+              Files are uploaded but not ingested yet. Click Start to begin parsing &amp;
+              embedding.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={startIngestion}
+            className="shrink-0 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:opacity-90"
+          >
+            Start ingestion ({stagedCount})
+          </button>
+        </section>
+      )}
+
       {uploads.length > 0 && (
         <section className="mt-4 rounded-lg border border-border bg-background p-4">
           <h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
@@ -328,7 +369,7 @@ export default function Admin() {
                   <span className="truncate font-medium text-foreground">{u.filename}</span>
                   <span className="ml-3 text-xs text-muted-foreground">
                     {u.phase === 'uploading' && `${Math.round((u.loaded / u.total) * 100)}%`}
-                    {u.phase === 'done' && 'Uploaded — queued for ingest'}
+                    {u.phase === 'done' && 'Uploaded — staged'}
                     {u.phase === 'duplicate' && `Skipped — ${u.message}`}
                     {u.phase === 'conflict' && 'Name conflict — awaiting decision'}
                     {u.phase === 'error' && `Error — ${u.message}`}

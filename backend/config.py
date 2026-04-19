@@ -72,7 +72,14 @@ class Settings(BaseSettings):
     EMBED_MAX_BATCH_TOKENS: int = 22500
     EMBED_MAX_TOKENS_PER_TEXT: int = 4500
 
-    INGEST_CONCURRENT_FILES: int = 5
+    # Keep low on Railway — Docling is ~1–2 GB RSS per concurrent file even
+    # with the singleton. 2 is safe on 8 GB; 3 on 16 GB.
+    INGEST_CONCURRENT_FILES: int = 2
+
+    # Fast path: if pymupdf pulls at least this many chars per page from a
+    # PDF, treat it as a native-text PDF and skip Docling entirely. Scanned
+    # PDFs fall below this and get routed through Docling-with-OCR.
+    PYMUPDF_MIN_CHARS_PER_PAGE: int = 50
 
     @property
     def cors_origins(self) -> list[str]:

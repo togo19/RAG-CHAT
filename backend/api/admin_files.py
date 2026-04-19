@@ -50,6 +50,8 @@ async def _delete_s3(key: str) -> None:
 
 
 def _schedule_ingest(tasks: BackgroundTasks, file_id: UUID) -> None:
+    """Only used by /replace (single file, immediate). Bulk uploads now use
+    the staged → queued → dispatcher path instead."""
     from ..services.ingest import run_ingest  # lazy to avoid Docling import on app boot
     tasks.add_task(run_ingest, file_id)
 
@@ -78,7 +80,11 @@ async def upload_files(
     """Multipart upload, one or many files. For each:
       - hash match  -> 'exact_duplicate'
       - name match  -> 'name_conflict' (frontend prompts replace)
-      - otherwise   -> upload to S3, insert row, schedule ingest.
+      - otherwise   -> upload to S3, insert row with status='staged'.
+
+    Staged files do NOT start ingesting until the admin calls
+    POST /admin/files/start-ingestion. This prevents a bulk upload of many
+    files from spawning many Docling instances simultaneously (OOM).
     """
     results = []
     for f in files:
@@ -123,23 +129,34 @@ async def upload_files(
             s3_key=key,
             size_bytes=len(body),
             mime_type=mime,
-            status="pending_ingest",
+            status="staged",
         )
         db.add(row)
         db.commit()
         db.refresh(row)
 
-        _schedule_ingest(background, row.id)
         log.info(
-            "[upload] queued ingest task id=%s filename=%r size=%d bytes",
+            "[upload] staged id=%s filename=%r size=%d bytes",
             str(row.id)[:8],
             row.filename,
             len(body),
         )
-        broker.publish(str(row.id), {"status": "pending_ingest", "filename": row.filename})
-        results.append({"filename": f.filename, "status": "queued", "file_id": str(row.id)})
+        broker.publish(str(row.id), {"status": "staged", "filename": row.filename})
+        results.append({"filename": f.filename, "status": "staged", "file_id": str(row.id)})
 
     return {"results": results}
+
+
+@router.post("/start-ingestion")
+def start_ingestion(_: dict = Depends(require_admin)):
+    """Flip every 'staged' row to 'queued' and wake the dispatcher. The
+    dispatcher itself enforces INGEST_CONCURRENT_FILES -- at most that many
+    Docling instances run at the same time."""
+    from ..services.ingest import stage_to_queued
+
+    count = stage_to_queued()
+    log.info("[start-ingestion] moved %d staged file(s) to queued", count)
+    return {"queued": count}
 
 
 @router.post("/{file_id}/replace")

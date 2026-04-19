@@ -75,6 +75,11 @@ from backend.startup import run_startup  # noqa: E402
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await run_startup()
+    # Start the ingestion dispatcher. Import lazily to keep Docling/pymupdf
+    # off the critical boot path; first Docling import happens only when a
+    # text-PDF pymupdf fallback or a non-PDF document is actually processed.
+    from backend.services.ingest import start_dispatcher
+    start_dispatcher()
     yield
 
 
