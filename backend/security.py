@@ -27,8 +27,8 @@ def _set_cookie(resp: Response, name: str, token: str) -> None:
         key=name,
         value=token,
         httponly=True,
-        samesite="lax",
-        secure=False,
+        samesite="none" if settings.CROSS_SITE_COOKIES else "lax",
+        secure=settings.CROSS_SITE_COOKIES,
         max_age=settings.JWT_EXPIRE_MINUTES * 60,
         path="/",
     )

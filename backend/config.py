@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     FRONTEND_URL: str = "http://localhost:3000"
     BACKEND_URL: str = "http://localhost:8000"
     CORS_ORIGINS: str = "http://localhost:3000"
+    # True in prod (cross-subdomain HTTPS): cookies need SameSite=None + Secure.
+    # False for local http://localhost dev.
+    CROSS_SITE_COOKIES: bool = False
 
     ADMIN_USERNAME: str
     ADMIN_PASSWORD: str

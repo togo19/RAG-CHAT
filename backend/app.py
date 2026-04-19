@@ -91,8 +91,8 @@ app.add_middleware(
     SessionMiddleware,
     secret_key=settings.JWT_SECRET,
     session_cookie="oauth_state",
-    same_site="lax",
-    https_only=False,
+    same_site="none" if settings.CROSS_SITE_COOKIES else "lax",
+    https_only=settings.CROSS_SITE_COOKIES,
 )
 
 app.include_router(auth.router)
