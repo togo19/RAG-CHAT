@@ -289,8 +289,11 @@ export default function Chat() {
           sidebarOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
-        <div className="border-b border-border px-4 py-2 md:pl-16">
-          <img src="/logo.png" alt="1stAId4SME" className="h-8 w-auto" />
+        <div className="flex items-center gap-2 border-b border-border px-4 py-2 md:pl-16">
+          <img src="/logo-short.png" alt="" className="h-8 w-8 shrink-0 object-contain" />
+          <span className="font-serif text-lg font-semibold tracking-tight text-foreground">
+            1stAId4SME
+          </span>
         </div>
 
         <div className="px-3 pt-3">
