@@ -2,6 +2,7 @@ import { ChevronDown, LogOut, Menu, Plus, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
 import ClaudeChatInput from '../components/ui/claude-style-chat-input';
+import ShaderBackground from '../components/ui/shader-background';
 import { AssistantMessage, type AssistantMsg, type Citation, type ToolCall } from '../components/chat/AssistantMessage';
 import { SourcePanel, type SourcePanelTarget } from '../components/chat/SourcePanel';
 import { api } from '../lib/api';
@@ -275,7 +276,8 @@ export default function Chat() {
   const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
 
   return (
-    <div className="flex h-[100dvh]">
+    <div className="theme-dark flex h-[100dvh] overflow-hidden">
+      <div className="flex h-full w-full">
       {sidebarOpen && (
         <div
           className="fixed inset-0 z-30 bg-black/40 md:hidden animate-fade-in"
@@ -283,7 +285,7 @@ export default function Chat() {
         />
       )}
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-72 flex-col border-r border-border bg-muted transform transition-transform duration-200 md:static md:w-64 md:translate-x-0 md:bg-muted/40 ${
+        className={`fixed inset-y-0 left-0 z-40 flex w-72 flex-col border-r border-border bg-muted transform transition-transform duration-200 md:static md:w-64 md:translate-x-0 ${
           sidebarOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
@@ -295,7 +297,7 @@ export default function Chat() {
           <button
             type="button"
             onClick={newChat}
-            className="flex w-full items-center justify-center gap-2 rounded-xl border border-white/70 bg-gradient-to-b from-sky-300/25 to-sky-500/20 px-3 py-2 text-sm font-semibold text-sky-800 backdrop-blur-xl transition hover:from-sky-300/40 hover:to-sky-500/35 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]"
+            className="flex w-full items-center justify-center gap-2 rounded-xl border border-white/20 bg-gradient-to-b from-sky-400/30 to-sky-600/25 px-3 py-2 text-sm font-semibold text-sky-100 backdrop-blur-xl transition hover:from-sky-400/45 hover:to-sky-600/40 shadow-[inset_0_1px_0_rgba(255,255,255,0.15)]"
           >
             <Plus className="h-4 w-4" />
             New chat
@@ -306,7 +308,7 @@ export default function Chat() {
           <button
             type="button"
             onClick={() => setHistoryOpen((v) => !v)}
-            className="flex w-full items-center justify-between rounded-xl border border-white/60 bg-white/30 px-3 py-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground backdrop-blur-xl transition hover:bg-white/50 hover:text-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]"
+            className="flex w-full items-center justify-between rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground backdrop-blur-xl transition hover:bg-white/10 hover:text-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]"
           >
             <span>History {chats.length > 0 && <span className="ml-1 font-normal normal-case tracking-normal">({chats.length})</span>}</span>
             <ChevronDown className={`h-4 w-4 transition-transform ${historyOpen ? '' : '-rotate-90'}`} />
@@ -372,7 +374,9 @@ export default function Chat() {
         </div>
       </aside>
 
-      <main className="flex min-w-0 flex-1 flex-col bg-bg-0">
+      <main className="relative isolate flex min-w-0 flex-1 flex-col overflow-hidden">
+        <ShaderBackground />
+        <div className="relative z-10 flex min-h-0 flex-1 flex-col">
         <div className="flex items-center justify-between border-b border-border bg-bg-100/80 px-3 py-2 backdrop-blur md:hidden">
           <button
             type="button"
@@ -446,6 +450,7 @@ export default function Chat() {
             </footer>
           </>
         )}
+        </div>
       </main>
 
       <SourcePanel target={sourceTarget} onClose={() => setSourceTarget(null)} />
@@ -529,6 +534,7 @@ export default function Chat() {
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }

@@ -276,12 +276,18 @@ export default function Admin() {
     if (selected.size === 0) return;
     const ids = Array.from(selected);
     if (!confirm(`Delete ${ids.length} file${ids.length === 1 ? '' : 's'} and all of their vectors?`)) return;
-    setFiles((prev) => prev.filter((f) => !selected.has(f.id)));
     setSelected(new Set());
-    const results = await Promise.allSettled(
-      ids.map((id) => api(`/admin/files/${id}`, { method: 'DELETE' })),
-    );
-    const failed = results.filter((r) => r.status === 'rejected').length;
+
+    let failed = 0;
+    for (const id of ids) {
+      try {
+        await api(`/admin/files/${id}`, { method: 'DELETE' });
+        setFiles((prev) => prev.filter((f) => f.id !== id));
+      } catch {
+        failed += 1;
+      }
+    }
+
     if (failed > 0) {
       pushToast('error', `${failed} delete request${failed === 1 ? '' : 's'} failed. Refreshing.`);
       refresh();

@@ -34,6 +34,38 @@
     --radius: 0.6rem;
   }
 
+  /* Dark theme scope — applied only to user-facing routes (Chat, Login). */
+  .theme-dark {
+    --background: 222 30% 8%;
+    --foreground: 210 20% 96%;
+
+    --muted: 222 22% 14%;
+    --muted-foreground: 215 15% 68%;
+
+    --border: 222 18% 22%;
+
+    --primary: 195 85% 55%;
+    --primary-foreground: 222 30% 8%;
+
+    /* Glassy, near-transparent surfaces so the shader bleeds through */
+    --bg-0: transparent;
+    --bg-100: rgba(15, 18, 32, 0.62);
+    --bg-200: rgba(30, 35, 58, 0.55);
+    --bg-300: rgba(120, 135, 180, 0.28);
+
+    --text-100: #F3F6FA;
+    --text-200: #E2E8F0;
+    --text-300: #B8C3D4;
+    --text-400: #8A96AE;
+    --text-500: #667389;
+
+    --accent: #38BDF8;
+    --accent-hover: #0EA5E9;
+    --accent-foreground: #0B1020;
+
+    color: hsl(var(--foreground));
+  }
+
   body {
     @apply bg-background text-foreground antialiased;
     font-family: 'Source Serif 4', Georgia, serif;
@@ -55,6 +87,16 @@
   .custom-scrollbar::-webkit-scrollbar-thumb:hover {
     background: var(--text-400);
   }
+}
+
+/* Hide scrollbars entirely inside the dark (user) theme */
+.theme-dark *::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+.theme-dark * {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 
 @keyframes shimmer-wave {
