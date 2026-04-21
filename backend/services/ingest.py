@@ -26,6 +26,12 @@ def _prefix(task: str, file_id: UUID, filename: str | None = None) -> str:
     return f"[{task} {tag}]"
 
 _semaphore: asyncio.Semaphore | None = None
+# Serializes Docling invocations (both OCR and no-OCR) across the whole
+# process. Docling's peak RSS is ~1.5–2 GB while converting, so on an 8 GB
+# box we must never run two Docling conversions at once — otherwise the
+# second one tips us over. Text PDFs (pymupdf) don't touch this lock and
+# can still run in parallel up to INGEST_CONCURRENT_FILES.
+_docling_lock_obj: asyncio.Lock | None = None
 
 
 def _sem() -> asyncio.Semaphore:
@@ -33,6 +39,13 @@ def _sem() -> asyncio.Semaphore:
     if _semaphore is None:
         _semaphore = asyncio.Semaphore(settings.INGEST_CONCURRENT_FILES)
     return _semaphore
+
+
+def _docling_lock() -> asyncio.Lock:
+    global _docling_lock_obj
+    if _docling_lock_obj is None:
+        _docling_lock_obj = asyncio.Lock()
+    return _docling_lock_obj
 
 
 # Docling converters are process-global singletons. Building one allocates
@@ -140,17 +153,18 @@ def _download(s3_key: str, prefix: str) -> bytes:
     return data
 
 
-def _try_pymupdf(data: bytes, prefix: str) -> str | None:
-    """Fast path for native-text PDFs. Returns markdown-ish text or None if
-    the PDF is image-heavy / scanned and should be routed through OCR.
+def _pymupdf_open_probe(data: bytes, prefix: str):
+    """Open a PDF via pymupdf and decide whether it's native-text or scanned.
 
-    pymupdf (fitz) uses ~50 MB RSS vs Docling's ~2 GB, and is 50–100× faster
-    for text-native PDFs. The density heuristic filters out scans: if we get
-    fewer than PYMUPDF_MIN_CHARS_PER_PAGE chars/page, the PDF is almost
-    certainly scanned and we fall through to the Docling+OCR path."""
+    Returns (doc, page_count) for text-native PDFs — the caller then streams
+    page slabs out of `doc` and must close it. Returns None if the PDF is
+    scanned/image-only (route to Docling-OCR) or if pymupdf can't open it.
+
+    Sampling strategy: read up to the first 8 pages to compute chars/page
+    density. We avoid extracting every page here so we don't materialize the
+    whole document's text in RAM just to decide a route."""
     import fitz  # pymupdf
 
-    t0 = time.perf_counter()
     try:
         doc = fitz.open(stream=data, filetype="pdf")
     except Exception as e:  # noqa: BLE001
@@ -158,35 +172,43 @@ def _try_pymupdf(data: bytes, prefix: str) -> str | None:
         return None
     try:
         page_count = doc.page_count
-        pages_text: list[str] = []
-        total_chars = 0
-        for page in doc:
-            text = page.get_text("text") or ""
-            pages_text.append(text.strip())
-            total_chars += len(text)
-        avg = total_chars / max(1, page_count)
+        sample = min(page_count, 8)
+        total = 0
+        for i in range(sample):
+            total += len(doc[i].get_text("text") or "")
+        avg = total / max(1, sample)
         if avg < settings.PYMUPDF_MIN_CHARS_PER_PAGE:
             log.info(
-                "%s pymupdf yielded %.1f chars/page over %d pages -- looks scanned, routing to OCR",
+                "%s pymupdf sampled %.1f chars/page over %d pages -- looks scanned, routing to OCR",
                 prefix,
                 avg,
-                page_count,
+                sample,
             )
+            doc.close()
             return None
-        # Join pages with blank lines so the paragraph-aware chunker sees
-        # page boundaries as natural breakpoints.
-        md = "\n\n".join(p for p in pages_text if p)
         log.info(
-            "%s pymupdf extracted %d chars from %d pages in %.2fs (%.0f chars/page) -- skipping Docling",
+            "%s pymupdf probe %.0f chars/page over %d sample pages (total %d pages) -- streaming",
             prefix,
-            len(md),
-            page_count,
-            time.perf_counter() - t0,
             avg,
+            sample,
+            page_count,
         )
-        return md
-    finally:
+        return doc, page_count
+    except Exception:
         doc.close()
+        raise
+
+
+def _extract_pdf_slab(doc, start: int, end: int) -> str:
+    """Pull text from pages [start, end) out of an already-open fitz doc and
+    return a single markdown slab. Called via to_thread so we don't stall the
+    event loop while pymupdf churns through pages."""
+    parts: list[str] = []
+    for i in range(start, end):
+        t = (doc[i].get_text("text") or "").strip()
+        if t:
+            parts.append(t)
+    return "\n\n".join(parts)
 
 
 def _parse_with_docling(data: bytes, filename: str, prefix: str, with_ocr: bool) -> str:
@@ -222,25 +244,6 @@ def _parse_with_docling(data: bytes, filename: str, prefix: str, with_ocr: bool)
 
 def _is_pdf(filename: str) -> bool:
     return filename.lower().endswith(".pdf")
-
-
-async def _parse_document(
-    data: bytes, filename: str, prefix: str
-) -> str:
-    """Routing:
-      - PDF: pymupdf fast path. If that yields too little text, Docling+OCR.
-      - Everything else (docx/pptx/xlsx/txt/...): straight to Docling (no OCR).
-    """
-    if _is_pdf(filename):
-        md = await asyncio.to_thread(_try_pymupdf, data, prefix)
-        if md is not None:
-            return md
-        return await asyncio.to_thread(
-            _parse_with_docling, data, filename, prefix, True  # OCR on for scans
-        )
-    return await asyncio.to_thread(
-        _parse_with_docling, data, filename, prefix, False
-    )
 
 
 def _chunk_markdown(text: str, target_chars: int = 2000, overlap_chars: int = 200) -> list[str]:
@@ -310,49 +313,36 @@ async def run_ingest(file_id: UUID) -> None:
             broker.publish(str(file_id), {"status": "failed", "error": str(e)[:200]})
 
 
-async def _do_ingest(file_id: UUID, filename: str, s3_key: str, prefix: str) -> None:
-    # 1. parse
-    await asyncio.to_thread(
-        _update_status, file_id, status="parsing", stage_current=0, stage_total=0
-    )
-    broker.publish(str(file_id), {"status": "parsing", "filename": filename})
+PDF_STREAM_PAGE_SLAB = 20
 
-    data = await asyncio.to_thread(_download, s3_key, prefix)
-    markdown = await _parse_document(data, filename, prefix)
 
-    # 2. chunk
-    log.info("%s chunking markdown (target ~500 tokens per chunk)...", prefix)
-    t_chunk = time.perf_counter()
-    await asyncio.to_thread(_update_status, file_id, status="chunking")
-    broker.publish(str(file_id), {"status": "chunking"})
+async def _process_markdown_slab(
+    file_id: UUID,
+    filename: str,
+    prefix: str,
+    markdown: str,
+    chunk_index_base: int,
+) -> int:
+    """Chunk one markdown slab, then for each embedding batch: embed, upsert
+    to Qdrant, and persist chunk rows to Postgres — releasing each batch's
+    buffers before moving to the next. Returns the number of chunks that were
+    produced and stored for this slab.
+
+    Per-batch persistence (vs. the old end-of-file accumulation) is what
+    keeps peak RAM bounded on very large documents: at any instant we hold
+    one batch's worth of text + vectors + point structs, not the whole
+    document's."""
     chunks = _chunk_markdown(markdown)
-    total = len(chunks)
-    log.info(
-        "%s chunked into %d pieces in %.2fs",
-        prefix,
-        total,
-        time.perf_counter() - t_chunk,
-    )
-    if total == 0:
-        raise RuntimeError("document produced zero chunks")
-    await asyncio.to_thread(_update_status, file_id, stage_current=0, stage_total=total)
-    broker.publish(
-        str(file_id), {"status": "chunking", "stage_current": 0, "stage_total": total}
-    )
-
-    # 3. embed + upsert in batches
-    await asyncio.to_thread(_update_status, file_id, status="embedding")
-    broker.publish(
-        str(file_id), {"status": "embedding", "stage_current": 0, "stage_total": total}
-    )
+    if not chunks:
+        return 0
     batch_size = settings.EMBED_MAX_BATCH_ITEMS
-    batch_total = (total + batch_size - 1) // batch_size
-    chunk_records: list[dict] = []
+    slab_total = len(chunks)
+    batch_total = (slab_total + batch_size - 1) // batch_size
 
-    for batch_idx, start in enumerate(range(0, total, batch_size), 1):
+    for batch_idx, start in enumerate(range(0, slab_total, batch_size), 1):
         batch = chunks[start : start + batch_size]
         log.info(
-            "%s embedding batch %d/%d (%d items)...",
+            "%s embedding slab batch %d/%d (%d items)...",
             prefix,
             batch_idx,
             batch_total,
@@ -366,6 +356,7 @@ async def _do_ingest(file_id: UUID, filename: str, s3_key: str, prefix: str) -> 
             time.perf_counter() - t_embed,
         )
         points = []
+        records: list[dict] = []
         for j, (text, vec) in enumerate(zip(batch, vectors)):
             point_id = str(uuid4())
             points.append(
@@ -375,12 +366,12 @@ async def _do_ingest(file_id: UUID, filename: str, s3_key: str, prefix: str) -> 
                     payload={
                         "file_id": str(file_id),
                         "filename": filename,
-                        "chunk_index": start + j,
+                        "chunk_index": chunk_index_base + start + j,
                         "chunk_text": text,
                     },
                 )
             )
-            chunk_records.append({"point_id": point_id, "text": text})
+            records.append({"point_id": point_id, "text": text})
         t_upsert = time.perf_counter()
         await qdrant.client().upsert(
             collection_name=settings.QDRANT_COLLECTION, points=points
@@ -391,21 +382,138 @@ async def _do_ingest(file_id: UUID, filename: str, s3_key: str, prefix: str) -> 
             time.perf_counter() - t_upsert,
             len(points),
         )
-        done = min(start + batch_size, total)
-        await asyncio.to_thread(_update_status, file_id, stage_current=done)
+        # Persist chunk rows for this batch only — nothing accumulates across
+        # batches or slabs.
+        await asyncio.to_thread(_insert_chunk_rows, file_id, records)
+        del points, records, vectors, batch
+
+    return slab_total
+
+
+async def _do_ingest(file_id: UUID, filename: str, s3_key: str, prefix: str) -> None:
+    # 1. parse + route
+    await asyncio.to_thread(
+        _update_status, file_id, status="parsing", stage_current=0, stage_total=0
+    )
+    broker.publish(str(file_id), {"status": "parsing", "filename": filename})
+
+    data = await asyncio.to_thread(_download, s3_key, prefix)
+
+    # Flip to 'embedding' before any slab is processed; with streaming there
+    # is no distinct 'chunking' phase visible to the user — chunking happens
+    # interleaved with embedding slab-by-slab.
+    await asyncio.to_thread(_update_status, file_id, status="embedding")
+    broker.publish(
+        str(file_id), {"status": "embedding", "stage_current": 0, "stage_total": 0}
+    )
+
+    total_chunks = 0
+
+    if _is_pdf(filename):
+        probe = await asyncio.to_thread(_pymupdf_open_probe, data, prefix)
+        if probe is not None:
+            # Text-native PDF: stream page slabs out of the already-open doc
+            # and free `data` immediately — fitz copies the bytes on open, so
+            # the original buffer is no longer needed.
+            doc, page_count = probe
+            del data
+            try:
+                for start_page in range(0, page_count, PDF_STREAM_PAGE_SLAB):
+                    end_page = min(start_page + PDF_STREAM_PAGE_SLAB, page_count)
+                    t_slab = time.perf_counter()
+                    slab = await asyncio.to_thread(
+                        _extract_pdf_slab, doc, start_page, end_page
+                    )
+                    log.info(
+                        "%s slab pages %d-%d extracted in %.2fs (%d chars)",
+                        prefix,
+                        start_page + 1,
+                        end_page,
+                        time.perf_counter() - t_slab,
+                        len(slab),
+                    )
+                    produced = await _process_markdown_slab(
+                        file_id, filename, prefix, slab, total_chunks
+                    )
+                    total_chunks += produced
+                    del slab
+                    # Publish incremental progress. stage_total grows as we
+                    # go; the UI just reflects whatever the latest snapshot
+                    # says, which is acceptable for streaming ingest.
+                    await asyncio.to_thread(
+                        _update_status,
+                        file_id,
+                        stage_current=total_chunks,
+                        stage_total=total_chunks,
+                    )
+                    broker.publish(
+                        str(file_id),
+                        {
+                            "status": "embedding",
+                            "stage_current": total_chunks,
+                            "stage_total": total_chunks,
+                        },
+                    )
+            finally:
+                doc.close()
+        else:
+            # Scanned PDF: Docling-OCR, serialized across the process.
+            async with _docling_lock():
+                md = await asyncio.to_thread(
+                    _parse_with_docling, data, filename, prefix, True
+                )
+            del data
+            total_chunks = await _process_markdown_slab(
+                file_id, filename, prefix, md, 0
+            )
+            del md
+            await asyncio.to_thread(
+                _update_status,
+                file_id,
+                stage_current=total_chunks,
+                stage_total=total_chunks,
+            )
+            broker.publish(
+                str(file_id),
+                {
+                    "status": "embedding",
+                    "stage_current": total_chunks,
+                    "stage_total": total_chunks,
+                },
+            )
+    else:
+        # Non-PDF (docx/pptx/xlsx/txt): Docling no-OCR, serialized.
+        async with _docling_lock():
+            md = await asyncio.to_thread(
+                _parse_with_docling, data, filename, prefix, False
+            )
+        del data
+        total_chunks = await _process_markdown_slab(
+            file_id, filename, prefix, md, 0
+        )
+        del md
+        await asyncio.to_thread(
+            _update_status,
+            file_id,
+            stage_current=total_chunks,
+            stage_total=total_chunks,
+        )
         broker.publish(
             str(file_id),
-            {"status": "embedding", "stage_current": done, "stage_total": total},
+            {
+                "status": "embedding",
+                "stage_current": total_chunks,
+                "stage_total": total_chunks,
+            },
         )
 
-    # 4. persist chunk rows (for traceability; Qdrant is the source of truth)
-    log.info("%s persisting %d chunk rows to Postgres", prefix, len(chunk_records))
-    await asyncio.to_thread(_insert_chunk_rows, file_id, chunk_records)
+    if total_chunks == 0:
+        raise RuntimeError("document produced zero chunks")
 
-    # 5. done
     await asyncio.to_thread(_update_status, file_id, status="ready")
     broker.publish(
-        str(file_id), {"status": "ready", "stage_current": total, "stage_total": total}
+        str(file_id),
+        {"status": "ready", "stage_current": total_chunks, "stage_total": total_chunks},
     )
 
 
