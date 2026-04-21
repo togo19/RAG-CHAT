@@ -5,6 +5,17 @@ import { API_BASE } from '../lib/apiBase';
 import { useSession } from '../lib/auth';
 import { uploadWithProgress } from '../lib/stream';
 
+// Matches the backend ingest routing in backend/services/ingest.py — PDFs go
+// via pymupdf/Docling, the rest via Docling. Anything outside this set is
+// silently skipped at upload time so we don't stage files the pipeline can't
+// parse.
+const SUPPORTED_EXTENSIONS = new Set(['pdf', 'docx', 'pptx', 'xlsx', 'txt']);
+
+function isSupportedFile(name: string): boolean {
+  const ext = name.toLowerCase().split('.').pop();
+  return !!ext && SUPPORTED_EXTENSIONS.has(ext);
+}
+
 type FileRow = {
   id: string;
   filename: string;
@@ -139,7 +150,20 @@ export default function Admin() {
 
   async function handleFiles(list: FileList | null) {
     if (!list || list.length === 0) return;
-    const items = Array.from(list);
+    const all = Array.from(list);
+    const items = all.filter((f) => isSupportedFile(f.name));
+    const skipped = all.length - items.length;
+    if (skipped > 0) {
+      const names = all
+        .filter((f) => !isSupportedFile(f.name))
+        .map((f) => f.name)
+        .join(', ');
+      pushToast(
+        'info',
+        `Skipped ${skipped} unsupported file${skipped === 1 ? '' : 's'}: ${names}. Supported: PDF, DOCX, PPTX, XLSX, TXT.`,
+      );
+    }
+    if (items.length === 0) return;
     const active: ActiveUpload[] = items.map((f) => ({
       key: `${f.name}-${f.size}-${Date.now()}-${Math.random()}`,
       filename: f.name,
@@ -337,6 +361,7 @@ export default function Admin() {
             type="file"
             multiple
             hidden
+            accept=".pdf,.docx,.pptx,.xlsx,.txt"
             onChange={(e) => handleFiles(e.target.files)}
           />
         </div>
